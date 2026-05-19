@@ -1,0 +1,16 @@
+# 编译输出
+Output/
+Listing/
+
+# Keil 个人配置
+Project/RVMDK（uv5）/DebugConfig/
+Project/RVMDK（uv5）/RTE/
+Project/RVMDK（uv5）/*.uvguix*
+Project/RVMDK（uv5）/*.uvoptx
+
+# API 密钥
+.env
+
+# 系统文件
+.DS_Store
+Thumbs.db
