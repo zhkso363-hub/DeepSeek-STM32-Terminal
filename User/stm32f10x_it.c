@@ -199,10 +199,21 @@ void DEBUG_USART_IRQHandler(void)
 				break;
 
 			case 3:	// 接收正文
-				if (g_rx_index < sizeof(g_ai_response) - 1)
-					g_ai_response[g_rx_index++] = (char)byte;
-				if (g_rx_index >= g_data_len)
-					g_rx_state = 4;
+				if (g_data_len == 0) {
+					/* 零长度帧（切灯/清屏）：当前 byte 即为帧尾 */
+					if (byte == 0x55) {
+						g_ai_response[0] = '\0';
+						g_emotion = g_emotion_tag;
+						g_packet_ready = 1;
+					}
+					g_rx_state = 0;
+					g_rx_index = 0;
+				} else {
+					if (g_rx_index < sizeof(g_ai_response) - 1)
+						g_ai_response[g_rx_index++] = (char)byte;
+					if (g_rx_index >= g_data_len)
+						g_rx_state = 4;
+				}
 				break;
 
 			case 4:	// 校验帧尾
@@ -211,8 +222,6 @@ void DEBUG_USART_IRQHandler(void)
 					g_ai_response[g_rx_index] = '\0';
 					g_emotion = g_emotion_tag;
 					g_packet_ready = 1;
-					printf("[OK] PKT tag=0x%02X len=%d\n",
-						   g_emotion_tag, g_data_len);
 				}
 				/* 无论成功或失败，复位状态机 */
 				g_rx_state = 0;

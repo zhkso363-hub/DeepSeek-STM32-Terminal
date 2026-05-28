@@ -14,3 +14,7 @@ Project/RVMDK（uv5）/*.uvoptx
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# Python
+__pycache__/
+*.pyc

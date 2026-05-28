@@ -33,11 +33,12 @@
 
 /* ========== LCD 显示参数 ========== */
 #define LINE_MAX_UNITS  30      /* 一行最大宽度单位：15汉字(×2) = 30英文字符(×1) */
-#define LINE_OFFSET_Y   20      /* 换行Y偏移(px)，16点阵+4间距 */
+#define LINE_OFFSET_Y   24      /* 换行Y偏移(px)，16点阵+8行距 */
 #define FONT_W_EN        8      /* 英文字符宽度(px) */
 #define FONT_W_CN       16      /* 中文字符宽度(px) */
-#define DISP_X_START     0
-#define DISP_Y_START     0
+#define MAX_LINES       16      /* 最大排版行数 */
+#define CURSOR_X_INIT   10      /* 追加模式初始X */
+#define CURSOR_Y_INIT   40      /* 追加模式初始Y */
 
 /* ========== 蜂鸣器 GPIO 初始化 ========== */
 static void Buzzer_GPIO_Config(void)
@@ -54,62 +55,107 @@ static void Buzzer_GPIO_Config(void)
 
 
 
+/* ========== 追加模式光标状态 ========== */
+static uint16_t g_cx = CURSOR_X_INIT;
+static uint16_t g_cy = CURSOR_Y_INIT;
+static uint16_t g_line_units = 0;
+
+
 static void Display_Text(const char *str)
 {
-    uint16_t x = DISP_X_START;
-    uint16_t y = DISP_Y_START;
+    /* === Phase 1: 排版分析，记录每行占用的 units 数 === */
+    uint8_t lu[MAX_LINES];
+    uint8_t lc = 0;
+    const char *p = str;
     uint16_t units = 0;
 
-    /* 清屏为白色 */
-    LCD_SetTextColor(BLACK);
-    LCD_SetBackColor(WHITE);
-    ILI9341_Clear(0, 0, LCD_X_LENGTH, LCD_Y_LENGTH);
+    while (*p && lc < MAX_LINES)
+    {
+        if ((uint8_t)*p < 128) {
+            if (units >= LINE_MAX_UNITS) { lu[lc++] = units; units = 0; }
+            units += 1; p++;
+        } else {
+            if (units + 2 > LINE_MAX_UNITS) { lu[lc++] = units; units = 0; }
+            units += 2; p += 2;
+        }
+    }
+    if (units > 0 || lc == 0)
+        lu[lc++] = units;
 
-    /* 设置英文字体为 8x16，与中文 16x16 高度对齐 */
+    uint16_t total_h = lc * LINE_OFFSET_Y;
+    uint16_t y = (LCD_Y_LENGTH - total_h) / 2;
+
+    LCD_SetTextColor(COLOR_ICEBLUE);
+    LCD_SetBackColor(BLACK);
+    ILI9341_Clear(0, 0, LCD_X_LENGTH, LCD_Y_LENGTH);
     LCD_SetFont(&Font8x16);
 
-    /* 调试打印原始 GBK 字节流 */
-    printf("[DBG] GBK bytes:");
-    for (const char *p = str; *p; p++)
-        printf(" %02X", (uint8_t)*p);
-    printf("\r\n");
+    uint8_t li = 0;
+    units = 0;
 
-    while (*str != '\0')
+    while (*str != '\0' && li < lc)
     {
-        if ((uint8_t)*str < 128)
-        {
-            /* 英文字符 — 预检查换行 */
-            if (units >= LINE_MAX_UNITS)
-            {
-                x = DISP_X_START;
-                y += LINE_OFFSET_Y;
-                units = 0;
-            }
-            if (y + FONT_W_CN > LCD_Y_LENGTH)
-                y = DISP_Y_START;
+        if (units == 0)
+            y = (LCD_Y_LENGTH - lc * LINE_OFFSET_Y) / 2 + li * LINE_OFFSET_Y;
 
+        uint16_t x = (LCD_X_LENGTH - lu[li] * FONT_W_EN) / 2 + units * FONT_W_EN;
+
+        if ((uint8_t)*str < 128) {
             ILI9341_DispChar_EN(x, y, *str);
-            x += FONT_W_EN;
-            units += 1;
-            str++;
-        }
-        else
-        {
-            /* 中文字符（GBK 双字节）— 需 2 units，若剩余不足则提前换行 */
-            if (units + 2 > LINE_MAX_UNITS)
-            {
-                x = DISP_X_START;
-                y += LINE_OFFSET_Y;
-                units = 0;
-            }
-            if (y + FONT_W_CN > LCD_Y_LENGTH)
-                y = DISP_Y_START;
-
+            units += 1; str++;
+        } else {
             uint16_t ch = *(uint16_t *)str;
-            ch = (ch << 8) | (ch >> 8);     /* 大小端转换 */
+            ch = (ch << 8) | (ch >> 8);
             ILI9341_DispChar_CH(x, y, ch);
-            x += FONT_W_CN;
-            units += 2;
+            units += 2; str += 2;
+        }
+        Delay_us(1);
+        if (units >= lu[li]) { li++; units = 0; }
+    }
+}
+
+
+/**
+  * Display_Append — 无闪烁逐字追加
+  * 在光标位置绘制字符并前进，不清屏。
+  * 用于硬件打字机模式，由 Python 端流式逐字推送。
+  */
+static void Display_Append(const char *str)
+{
+    LCD_SetTextColor(COLOR_ICEBLUE);
+    LCD_SetBackColor(BLACK);
+    LCD_SetFont(&Font8x16);
+
+    while (*str)
+    {
+        /* Y 超出屏幕 → 回滚到顶部（简单滚动） */
+        if (g_cy + FONT_W_CN > LCD_Y_LENGTH) {
+            g_cy = CURSOR_Y_INIT;
+            g_cx = CURSOR_X_INIT;
+            g_line_units = 0;
+        }
+
+        if ((uint8_t)*str < 128) {
+            if (g_line_units >= LINE_MAX_UNITS) {
+                g_cx = CURSOR_X_INIT;
+                g_cy += LINE_OFFSET_Y;
+                g_line_units = 0;
+            }
+            ILI9341_DispChar_EN(g_cx, g_cy, *str);
+            g_cx += FONT_W_EN;
+            g_line_units += 1;
+            str++;
+        } else {
+            if (g_line_units + 2 > LINE_MAX_UNITS) {
+                g_cx = CURSOR_X_INIT;
+                g_cy += LINE_OFFSET_Y;
+                g_line_units = 0;
+            }
+            uint16_t ch = *(uint16_t *)str;
+            ch = (ch << 8) | (ch >> 8);
+            ILI9341_DispChar_CH(g_cx, g_cy, ch);
+            g_cx += FONT_W_CN;
+            g_line_units += 2;
             str += 2;
         }
     }
@@ -118,57 +164,56 @@ static void Display_Text(const char *str)
 
 int main(void)
 {
-    /* ====== 硬件初始化 ====== */
-    ILI9341_Init();                     /* ILI9341 液晶屏 */
-    SPI_FLASH_Init();                   /* SPI Flash（中文字库） */
-    LED_GPIO_Config();                  /* RGB LED */
-    Buzzer_GPIO_Config();               /* 蜂鸣器 PA8 */
-    USART_Config();                     /* USART1 串口 */
-    SysTick_Init();                     /* SysTick 毫秒延时 */
+    ILI9341_Init();
+    SPI_FLASH_Init();
+    LED_GPIO_Config();
+    Buzzer_GPIO_Config();
+    USART_Config();
+    SysTick_Init();
 
-    /* 清屏为全白 */
-    ILI9341_GramScan(3);                /* 竖屏模式：X=320, Y=240 */
-    LCD_SetBackColor(WHITE);
+    ILI9341_GramScan(3);
+    LCD_SetBackColor(BLACK);
     ILI9341_Clear(0, 0, LCD_X_LENGTH, LCD_Y_LENGTH);
-
-    /* 默认字体 */
     LCD_SetFont(&Font8x16);
-    LCD_SetTextColor(BLACK);
+    LCD_SetTextColor(COLOR_ICEBLUE);
 
     printf("\r\n[OK] DeepSeek AI Terminal Start\r\n");
 
-    /* ========== 主循环：全速轮询 g_packet_ready ========== */
+    /* ========== 主循环：三态帧分发 ========== */
     while (1)
     {
         if (g_packet_ready == 1)
         {
-            /* 【第一步：立即刷新屏幕显示文字】 */
-            Display_Text(g_ai_response);
+            uint8_t emotion = g_emotion;
+            uint8_t data_len = g_data_len;
 
-            /* 【第二步：灯光长亮驻留控制（严格互斥）】 */
-            if (g_emotion == 0x01 || g_emotion == '1')
-            {
-                /* 正面情绪：只亮绿灯（PB0拉低），红灯（PB5拉高）蓝灯（PB1拉高）灭 */
-                GPIO_ResetBits(GPIOB, GPIO_Pin_0);   /* 绿灯 亮 */
-                GPIO_SetBits(GPIOB, GPIO_Pin_5);    /* 红灯 灭 */
-                GPIO_SetBits(GPIOB, GPIO_Pin_1);    /* 蓝灯 灭 */
-            }
-            else if (g_emotion == 0x02 || g_emotion == '2')
-            {
-                /* 负面情绪：只亮红灯（PB5拉低），绿灯（PB0拉高）蓝灯（PB1拉高）灭 */
-                GPIO_SetBits(GPIOB, GPIO_Pin_0);    /* 绿灯 灭 */
-                GPIO_ResetBits(GPIOB, GPIO_Pin_5);   /* 红灯 亮 */
-                GPIO_SetBits(GPIOB, GPIO_Pin_1);    /* 蓝灯 灭 */
-            }
-            else if (g_emotion == 0x03 || g_emotion == '3')
-            {
-                /* 中立情绪：只亮蓝灯（PB1拉低），绿灯（PB0拉高）红灯（PB5拉高）灭 */
-                GPIO_SetBits(GPIOB, GPIO_Pin_0);    /* 绿灯 灭 */
-                GPIO_SetBits(GPIOB, GPIO_Pin_5);    /* 红灯 灭 */
-                GPIO_ResetBits(GPIOB, GPIO_Pin_1);   /* 蓝灯 亮 */
+            if (data_len == 0 && emotion == 0x00) {
+                /* — 清屏指令：[0xAA][0x00][0x00][0x55] — */
+                ILI9341_Clear(0, 0, LCD_X_LENGTH, LCD_Y_LENGTH);
+                g_cx = CURSOR_X_INIT;
+                g_cy = CURSOR_Y_INIT;
+                g_line_units = 0;
+            } else if (data_len == 0) {
+                /* — 纯切灯帧：LED 已由 ISR 设置，无显示动作 — */
+            } else {
+                /* — 文本帧：无闪烁追加 — */
+                Display_Append(g_ai_response);
+
+                if (emotion == 0x01) {
+                    GPIO_ResetBits(GPIOB, GPIO_Pin_0);   /* 绿灯 亮 */
+                    GPIO_SetBits(GPIOB, GPIO_Pin_5);     /* 红灯 灭 */
+                    GPIO_SetBits(GPIOB, GPIO_Pin_1);     /* 蓝灯 灭 */
+                } else if (emotion == 0x02) {
+                    GPIO_SetBits(GPIOB, GPIO_Pin_0);     /* 绿灯 灭 */
+                    GPIO_ResetBits(GPIOB, GPIO_Pin_5);   /* 红灯 亮 */
+                    GPIO_SetBits(GPIOB, GPIO_Pin_1);     /* 蓝灯 灭 */
+                } else if (emotion == 0x03) {
+                    GPIO_SetBits(GPIOB, GPIO_Pin_0);     /* 绿灯 灭 */
+                    GPIO_SetBits(GPIOB, GPIO_Pin_5);     /* 红灯 灭 */
+                    GPIO_ResetBits(GPIOB, GPIO_Pin_1);   /* 蓝灯 亮 */
+                }
             }
 
-            /* 【第三步：最后清零标志，严禁提前】 */
             g_packet_ready = 0;
         }
     }
